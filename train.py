@@ -108,7 +108,7 @@ def train_model(X_train, X_test, y_train, y_test, model_class, run_name, params=
             pipeline, 
             "model", 
             signature=signature, 
-            input_example=X_train.iloc[:1]
+            input_example=X_train.iloc[:2]
         )
         
         print(f"  MAE:  {mae:.4f} MW")

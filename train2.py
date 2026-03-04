@@ -189,6 +189,9 @@ def load_and_clean_data():
     2022-03-11 12:00:00+00:00    False
     """
 
+    print(cleaned_df["Direction"].unique())
+    # ['SSE' 'SSW' 'WSW' 'SW' 'S' 'SE' 'W' 'WNW' 'NW' 'NNW' 'NNE' 'NE' 'ENE' 'E' 'ESE' 'N']
+
     # Altering the wind direction (Sin/Cos Encoding)
     direction_map = {
         'N': 0, 'NNE': 22.5, 'NE': 45, 'ENE': 67.5,
@@ -196,6 +199,10 @@ def load_and_clean_data():
         'S': 180, 'SSW': 202.5, 'SW': 225, 'WSW': 247.5,
         'W': 270, 'WNW': 292.5, 'NW': 315, 'NNW': 337.5
     }
+    cleaned_df["Degree"] = cleaned_df["Direction"].map(direction_map)
+    cleaned_df["rad"] = np.deg2rad(cleaned_df["Degree"])
+    cleaned_df["Sin_Dir"] = np.sin(cleaned_df["rad"])
+    cleaned_df["Cos_Dir"] = np.cos(cleaned_df["rad"])
 
     """
     - I used a dictionary called direction_map to translate the 16 categorical compass strings (like 'N' or 'SW') 
@@ -268,6 +275,11 @@ def load_and_clean_data():
 
     # Handle NaNs
     cleaned_df = cleaned_df.dropna()
+
+    """
+    - I used .dropna() at the very end as a final safety step, in case something went wrong in the previous
+    steps.
+    """
     
     return cleaned_df
 
@@ -278,31 +290,76 @@ def train_model(X_train, X_test, y_train, y_test, model_class, run_name, params=
         params = {}
 
     with mlflow.start_run(run_name=run_name) as run:
+        """
+        Starts a recording session. Every setting and result inside this block is saved to the MLflow dashboard. 
+        """
     
         # A. Build the Pipeline Steps
         steps = [("Scaler", MinMaxScaler())]
+        """
+        MinMaxScaler squishes every feature into a range between 0 and 1.
+        """
 
         # Add Polynomial Features if requested (Crucial for the S-Curve fit)
+        # This is feature engineering
         if poly_degree:
             steps.append(("Poly", PolynomialFeatures(degree=poly_degree)))
             mlflow.log_param("poly_degree", poly_degree)
+            """
+            Polynomial fits better than Linear Regression because wind turbine power generation 
+            isn't a straight line but an S-shaped curve.
+            """
     
         # Add the Model
         model_instance = model_class(**params)
+        """
+        I used the ** unpacking operator to take the params dictionary and inject its contents 
+        into the model_class. This unpacks a dictionary like {"alpha": 1.0} and turns 
+        it into actual code: Ridge(alpha=1.0). Params is present only for the Ridge model.
+        """
         steps.append(("Model", model_instance))
+        """
+        model_instance is model_class which either LinearRegression or Ridge, and has params
+        only in the Ridge.
+
+        There are two or three steps in the pipeline: MinMaxScaler, PolynomialFeatures if poly_degree, model_instance.
+        """
 
         # B. Train
-        print(f"\nTraining: {run_name}")
+        print(f"\nTraining: {run_name}") # run_name is one of these: Linear_Baseline, Ridge_Alpha_1.0, Poly_Degree_2, Poly_Degree_3
         pipeline = Pipeline(steps)
+        """
+        I used the Scikit-Learn Pipeline class to bundle the scaling (minmaxscaler), 
+        feature engineering (PolynomialFeatures), and modeling (model_instance) steps together.
+        """
         pipeline.fit(X_train, y_train)
+        """
+        I used the .fit() method, passing in X_train and y_train, to execute the training process. 
+        This pushes the raw training data through the scaling and transformation steps before finally 
+        training the model to predict the true power generation targets
+        """
         
         # C. Predict
         y_pred = pipeline.predict(X_test)
+        """
+        I used the .predict() method on the trained pipeline object, passing in the unseen X_test dataset 
+        (the future weather conditions), to generate the model's estimated power generation values, 
+        which I stored in the y_pred variable.
+        """
         
         # D. Metrics
         mae = mean_absolute_error(y_test, y_pred)
         rmse = np.sqrt(mean_squared_error(y_test, y_pred))
         r2 = r2_score(y_test, y_pred)
+        """
+        - I used the mean_absolute_error function to calculate the MAE, which provides a straightforward average 
+        of exactly how far off my model's predictions were in megawatts (MW).
+        - I used the mean_squared_error function, wrapped in NumPy's square root function (np.sqrt()), 
+        to calculate the RMSE. This specific metric heavily penalizes the model for making exceptionally large, 
+        singular prediction errors.
+        - I used the r2_score function to calculate the R-squared value, which acts as a percentage grade 
+        indicating how much of the actual variance in power generation my model successfully explained.
+        """
         
         # E. Logging
         mlflow.log_params(params)
@@ -310,6 +367,13 @@ def train_model(X_train, X_test, y_train, y_test, model_class, run_name, params=
         mlflow.log_metric("rmse", rmse)
         mlflow.log_metric("r2", r2)
         mlflow.set_tag("model_type", str(model_class.__name__))
+        """
+        - I used the mlflow.log_params() function to record the exact dictionary of settings 
+        (like the Ridge alpha penalty) used for the current model.
+        - I used the mlflow.log_metric() function three times to save my calculated MAE, RMSE, and R-squared scores 
+        to the tracking server.
+        - I used the mlflow.set_tag() function to attach a label (e.g., "LinearRegression" or "Ridge") to the experiment run.
+        """
         
         # F. Save Model with Signature
         signature = infer_signature(X_train, y_pred)
@@ -319,6 +383,14 @@ def train_model(X_train, X_test, y_train, y_test, model_class, run_name, params=
             signature=signature, 
             input_example=X_train.iloc[:1]
         )
+        """
+        - I used infer_signature to create a blueprint of the data. It records the names and types of the columns 
+        so the model knows exactly what kind of data to expect in the future.
+        - I used mlflow.sklearn.log_model to save the trained pipeline. This stores the model permanently 
+        so it can be reused later without having to retrain it from scratch.
+        - I used the input_example parameter to save a single row of real data alongside the model, 
+        providing a clear example of what the inputs should look like.
+        """
         
         print(f"  MAE:  {mae:.4f} MW")
         print(f"  R2:   {r2:.4f}")
@@ -333,22 +405,39 @@ if __name__ == "__main__":
     # Load and Clean Data
     df = load_and_clean_data()
 
-    # features = ["Speed", "Sin_Dir", "Cos_Dir"]
-    # X = df[features]
-    # y = df["Total"]
+    # This is feature selection
+    features = ["Speed", "Sin_Dir", "Cos_Dir"]
+    X = df[features]
+    # Target variable. It is the total power generation.
+    y = df["Total"]
 
-    # # Split Data (Time Series Split - No Shuffle)
-    # # Train on Past (80%), Test on Future (20%)
-    # X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+    # Split Data (Time Series Split - No Shuffle)
+    # Train on Past (80%), Test on Future (20%)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
     
-    # # Experiment A: Baseline Linear Regression
-    # train_model(X_train, X_test, y_train, y_test, LinearRegression, "Linear_Baseline")
+    # Experiment A: Baseline Linear Regression
+    train_model(X_train, X_test, y_train, y_test, LinearRegression, "Linear_Baseline")
+    """
+    The simplest possible model. It tries to fit a straight line to the data.
+    """
 
-    # # Experiment B: Ridge Regression (Alpha 1.0)
-    # train_model(X_train, X_test, y_train, y_test, Ridge, "Ridge_Alpha_1.0", params={"alpha": 1.0})
+    # Experiment B: Ridge Regression (Alpha 1.0)
+    train_model(X_train, X_test, y_train, y_test, Ridge, "Ridge_Alpha_1.0", params={"alpha": 1.0})
+    """
+    Ridge is like Linear Regression, but keeps your model from jumping to extreme conclusions, and alpha 
+    is telling the code exactly how strict to be about it.
+    """
 
-    # # Experiment C: Polynomial Degree 2 (Parabola)
-    # train_model(X_train, X_test, y_train, y_test, LinearRegression, "Poly_Degree_2", poly_degree=2)
+    # Experiment C: Polynomial Degree 2 (Parabola)
+    train_model(X_train, X_test, y_train, y_test, LinearRegression, "Poly_Degree_2", poly_degree=2)
+    """
+    Creates a parabolic fit. It can curve once, which is better than a straight line but still 
+    doesn't quite capture the S-curve.
+    """
 
-    # # Experiment D: Polynomial Degree 3 (S-Curve)
-    # train_model(X_train, X_test, y_train, y_test, LinearRegression, "Poly_Degree_3", poly_degree=3)
+    # Experiment D: Polynomial Degree 3 (S-Curve)
+    train_model(X_train, X_test, y_train, y_test, LinearRegression, "Poly_Degree_3", poly_degree=3)
+    """
+    Creates a cubic fit. This is the sweet spot for wind turbines because a cubic equation can 
+    create the S-shape required to model power generation.
+    """
