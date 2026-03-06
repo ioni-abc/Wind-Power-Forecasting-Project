@@ -1,0 +1,1 @@
+Covariate shift occurs when the distribution of the input data (the features) changes between the training phase and the deployment (testing) phase, but the underlying relationship between the input and the target label remains the same.
